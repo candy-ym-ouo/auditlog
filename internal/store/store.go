@@ -1,0 +1,184 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"sync"
+	"time"
+
+	"auditlog/internal/model"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Store interface {
+	Close() error
+	Append(context.Context, model.Entry) (model.Entry, error)
+	Head(context.Context) (model.Head, error)
+	Entries(context.Context, model.Query) (model.Page, error)
+	AllEntries(context.Context) ([]model.Entry, error)
+	EntryByID(context.Context, int64) (model.Entry, error)
+	Stats(context.Context) (model.Stats, error)
+	Archive(context.Context, int, int) (model.ArchiveBatch, error)
+	Batches(context.Context, int, int) (model.BatchPage, error)
+	Batch(context.Context, int64) (model.ArchiveExport, error)
+	SetVerify(context.Context, model.VerifyReport) error
+	LastVerify(context.Context) (time.Time, string, error)
+}
+
+type Memory struct {
+	mu       sync.RWMutex
+	entries  []model.Entry
+	archives []model.Entry
+	batches  []model.ArchiveBatch
+	head     model.Head
+}
+
+func NewMemory() *Memory       { return &Memory{} }
+func (m *Memory) Close() error { return nil }
+func (m *Memory) Append(_ context.Context, e model.Entry) (model.Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e.ID = int64(len(m.entries) + len(m.archives) + 1)
+	m.entries = append(m.entries, e)
+	m.head = model.Head{Seq: e.Seq, Hash: e.Hash, PrevHash: e.PrevHash, UpdatedAt: time.Now().UTC()}
+	return e, nil
+}
+func (m *Memory) Head(_ context.Context) (model.Head, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.head, nil
+}
+func (m *Memory) AllEntries(_ context.Context) ([]model.Entry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := append([]model.Entry{}, m.archives...)
+	result = append(result, m.entries...)
+	sort.Slice(result, func(i, j int) bool { return result[i].Seq < result[j].Seq })
+	return result, nil
+}
+func (m *Memory) Entries(ctx context.Context, q model.Query) (model.Page, error) {
+	all, _ := m.AllEntries(ctx)
+	if !q.IncludeArchived {
+		m.mu.RLock()
+		all = append([]model.Entry{}, m.entries...)
+		m.mu.RUnlock()
+	}
+	filtered := filter(all, q)
+	return page(filtered, q), nil
+}
+func (m *Memory) EntryByID(_ context.Context, id int64) (model.Entry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range append(append([]model.Entry{}, m.entries...), m.archives...) {
+		if e.ID == id {
+			return e, nil
+		}
+	}
+	return model.Entry{}, ErrNotFound
+}
+func (m *Memory) Stats(_ context.Context) (model.Stats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return model.Stats{TotalEntries: int64(len(m.entries) + len(m.archives)), ArchivedEntries: int64(len(m.archives)), ActiveEntries: int64(len(m.entries)), HeadSeq: m.head.Seq, HeadHash: m.head.Hash, BatchCount: int64(len(m.batches))}, nil
+}
+func (m *Memory) Archive(_ context.Context, threshold, keep int) (model.ArchiveBatch, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(m.entries) - keep
+	if n <= 0 || len(m.entries) < threshold {
+		return model.ArchiveBatch{}, nil
+	}
+	moved := append([]model.Entry{}, m.entries[:n]...)
+	m.entries = append([]model.Entry{}, m.entries[n:]...)
+	b := model.ArchiveBatch{BatchNo: int64(len(m.batches) + 1), StartSeq: moved[0].Seq, EndSeq: moved[len(moved)-1].Seq, PrevHash: moved[0].PrevHash, HeadHash: moved[len(moved)-1].Hash, ItemCount: len(moved), ArchivedAt: time.Now().UTC()}
+	m.archives = append(m.archives, moved...)
+	m.batches = append(m.batches, b)
+	return b, nil
+}
+func (m *Memory) Batches(_ context.Context, p, s int) (model.BatchPage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return batchPage(m.batches, p, s), nil
+}
+func (m *Memory) Batch(_ context.Context, no int64) (model.ArchiveExport, error) {
+	for _, b := range m.batches {
+		if b.BatchNo == no {
+			var es []model.Entry
+			for _, e := range m.archives {
+				if e.Seq >= b.StartSeq && e.Seq <= b.EndSeq {
+					es = append(es, e)
+				}
+			}
+			return model.ArchiveExport{Batch: b, Entries: es}, nil
+		}
+	}
+	return model.ArchiveExport{}, ErrNotFound
+}
+func (m *Memory) SetVerify(_ context.Context, r model.VerifyReport) error { return nil }
+func (m *Memory) LastVerify(_ context.Context) (time.Time, string, error) {
+	return time.Time{}, "", nil
+}
+
+func filter(entries []model.Entry, q model.Query) []model.Entry {
+	out := make([]model.Entry, 0)
+	for _, e := range entries {
+		if q.Actor != "" && e.Actor != q.Actor || q.Action != "" && e.Action != q.Action || q.Target != "" && !contains(e.Target, q.Target) || q.SeqFrom > 0 && e.Seq < q.SeqFrom || q.SeqTo > 0 && e.Seq > q.SeqTo || q.From != nil && e.EventTime.Before(*q.From) || q.To != nil && e.EventTime.After(*q.To) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+func page(entries []model.Entry, q model.Query) model.Page {
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.PageSize < 1 {
+		q.PageSize = 20
+	}
+	if q.PageSize > 200 {
+		q.PageSize = 200
+	}
+	// Check the requested page before multiplying. A user-supplied page close
+	// to MaxInt would otherwise overflow the offset and panic while slicing.
+	if q.Page > (len(entries)/q.PageSize)+1 {
+		return model.Page{Items: []model.Entry{}, Page: q.Page, PageSize: q.PageSize, Total: int64(len(entries))}
+	}
+	start := (q.Page - 1) * q.PageSize
+	end := start + q.PageSize
+	if end > len(entries) {
+		end = len(entries)
+	}
+	return model.Page{Items: entries[start:end], Page: q.Page, PageSize: q.PageSize, Total: int64(len(entries))}
+}
+
+func batchPage(batches []model.ArchiveBatch, p, size int) model.BatchPage {
+	if p < 1 {
+		p = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 200 {
+		size = 200
+	}
+	if p > (len(batches)/size)+1 {
+		return model.BatchPage{Items: []model.ArchiveBatch{}, Page: p, PageSize: size, Total: int64(len(batches))}
+	}
+	start := (p - 1) * size
+	end := start + size
+	if end > len(batches) {
+		end = len(batches)
+	}
+	return model.BatchPage{Items: append([]model.ArchiveBatch{}, batches[start:end]...), Page: p, PageSize: size, Total: int64(len(batches))}
+}
