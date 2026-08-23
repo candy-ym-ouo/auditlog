@@ -267,10 +267,12 @@ CREATE INDEX IF NOT EXISTS idx_arch_entries_batch ON archive_entries(batch_no);
 // 200
 {
   "running": false, "last_run_at": "2025-01-01T07:00:00Z",
-  "last_batch_no": 3, "last_error": "",
+  "last_batch_no": 3, "last_error": "", "last_status": "ok",
   "threshold": 10000, "keep_min": 1000, "max_age_days": 90
 }
 ```
+
+`last_status` 取值：`ok`（本次写入批次）、`noop`（本次无可归档数据，运行正常）、`canceled`（运行被取消，未提交批次，`last_batch_no` 保留上次成功值）、`error`（存储返回非取消类错误，详见 `last_error`）。
 
 ### 5.10 GET /api/v1/archive/batches
 

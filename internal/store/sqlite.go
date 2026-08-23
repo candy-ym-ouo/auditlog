@@ -162,14 +162,16 @@ func (s *SQLite) Archive(ctx context.Context, threshold, keep int) (model.Archiv
 	if err != nil {
 		return model.ArchiveBatch{}, err
 	}
-	defer rows.Close()
-	var es []model.Entry
-	for rows.Next() {
-		e, eerr := scanEntry(rows)
-		if eerr != nil {
-			return model.ArchiveBatch{}, eerr
-		}
-		es = append(es, e)
+	// Fully materialize the rows before touching a transaction. With
+	// SetMaxOpenConns(1) a held read cursor would contend with the subsequent
+	// write transaction on the single connection, and if the deadline fires
+	// mid-scan rows.Err() must be consulted — otherwise a truncated result is
+	// silently treated as "nothing to archive" and the write proceeds on a
+	// canceled context. Close the cursor before BeginTx so the read side is
+	// released before the write side starts.
+	es, scanErr := scanEntries(rows)
+	if scanErr != nil {
+		return model.ArchiveBatch{}, scanErr
 	}
 	if len(es) == 0 {
 		return model.ArchiveBatch{}, nil
@@ -183,24 +185,51 @@ func (s *SQLite) Archive(ctx context.Context, threshold, keep int) (model.Archiv
 	if err != nil {
 		return b, err
 	}
+	// Safety net so every return path — including context cancellation
+	// mid-loop — rolls back the uncommitted transaction. Commit flips
+	// committed to true and Rollback is a benign no-op (returns
+	// sql.ErrTxDone) after a successful commit.
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
 	for _, e := range es {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO archive_entries(id,seq,prev_hash,hash,actor,action,target,detail,event_time,batch_no) VALUES(?,?,?,?,?,?,?,?,?,?)`, e.ID, e.Seq, e.PrevHash, e.Hash, e.Actor, e.Action, e.Target, string(e.Detail), e.EventTime.Format(time.RFC3339Nano), b.BatchNo); err != nil {
-			tx.Rollback()
+			// A canceled/deadlined context makes every subsequent Exec fail
+			// immediately; stop looping and let the deferred Rollback clean up.
 			return b, err
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO archive_batches VALUES(?,?,?,?,?,?,?,?)`, b.BatchNo, b.StartSeq, b.EndSeq, b.PrevHash, b.HeadHash, b.ItemCount, b.PayloadHash, b.ArchivedAt.Format(time.RFC3339Nano)); err != nil {
-		tx.Rollback()
 		return b, err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM audit_entries WHERE seq<=?`, b.EndSeq); err != nil {
-		tx.Rollback()
 		return b, err
 	}
 	if err = tx.Commit(); err != nil {
 		return b, err
 	}
+	committed = true
 	return b, nil
+}
+
+// scanEntries drains a rows cursor into a slice, closing the cursor and
+// surfacing a mid-iteration error (including context cancellation) via
+// rows.Err(). It exists so Archive never opens a write transaction while a
+// read cursor is still live or mistakes a truncated scan for an empty result.
+func scanEntries(rows *sql.Rows) ([]model.Entry, error) {
+	defer rows.Close()
+	var out []model.Entry
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 func (s *SQLite) Batches(ctx context.Context, p, size int) (model.BatchPage, error) {
 	var total int64
@@ -258,7 +287,7 @@ func (s *SQLite) Batch(ctx context.Context, no int64) (model.ArchiveExport, erro
 		}
 		es = append(es, e)
 	}
-	return model.ArchiveExport{Batch: b, Entries: es}, nil
+	return model.ArchiveExport{Batch: b, Entries: es}, rows.Err()
 }
 func (s *SQLite) SetVerify(ctx context.Context, r model.VerifyReport) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES('last_verify',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, fmt.Sprintf(`{"at":%q,"status":%q}`, r.VerifiedAt.Format(time.RFC3339Nano), r.Status))

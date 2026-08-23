@@ -25,7 +25,7 @@ func main() {
 	}
 	defer db.Close()
 	audit := service.NewAudit(db)
-	archive := service.NewArchive(db, cfg.ArchiveThreshold, cfg.ArchiveKeepMin, cfg.ArchiveMaxAgeDays)
+	archive := service.NewArchiveWithTimeout(db, cfg.ArchiveThreshold, cfg.ArchiveKeepMin, cfg.ArchiveMaxAgeDays, cfg.ArchiveTimeout)
 	trace := service.NewTrace(db)
 	verify := service.NewVerify(db)
 	srv := server.New(cfg.Addr, audit, archive, trace, verify, cfg.Token)

@@ -14,13 +14,14 @@ type Config struct {
 	DatabasePath      string
 	Token             string
 	ArchiveInterval   time.Duration
+	ArchiveTimeout    time.Duration
 	ArchiveThreshold  int
 	ArchiveKeepMin    int
 	ArchiveMaxAgeDays int
 }
 
 func Defaults() Config {
-	return Config{Addr: "127.0.0.1:8080", DatabasePath: "audit.db", ArchiveInterval: time.Hour, ArchiveThreshold: 10000, ArchiveKeepMin: 1000, ArchiveMaxAgeDays: 90}
+	return Config{Addr: "127.0.0.1:8080", DatabasePath: "audit.db", ArchiveInterval: time.Hour, ArchiveTimeout: 30 * time.Second, ArchiveThreshold: 10000, ArchiveKeepMin: 1000, ArchiveMaxAgeDays: 90}
 }
 
 func Load(args []string) (Config, error) {
@@ -29,6 +30,9 @@ func Load(args []string) (Config, error) {
 	setString(&c.DatabasePath, "AUDIT_DB")
 	setString(&c.Token, "AUDIT_TOKEN")
 	if err := setDuration(&c.ArchiveInterval, "AUDIT_ARCHIVE_INTERVAL"); err != nil {
+		return c, err
+	}
+	if err := setDuration(&c.ArchiveTimeout, "AUDIT_ARCHIVE_TIMEOUT"); err != nil {
 		return c, err
 	}
 	if err := setInt(&c.ArchiveThreshold, "AUDIT_ARCHIVE_THRESHOLD"); err != nil {
@@ -45,6 +49,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&c.DatabasePath, "db", c.DatabasePath, "SQLite database path")
 	fs.StringVar(&c.Token, "token", c.Token, "optional bearer token")
 	fs.DurationVar(&c.ArchiveInterval, "archive-interval", c.ArchiveInterval, "archive schedule interval")
+	fs.DurationVar(&c.ArchiveTimeout, "archive-timeout", c.ArchiveTimeout, "per-run timeout for archive operations")
 	fs.IntVar(&c.ArchiveThreshold, "archive-threshold", c.ArchiveThreshold, "active entry threshold")
 	fs.IntVar(&c.ArchiveKeepMin, "archive-keep-min", c.ArchiveKeepMin, "minimum active entries")
 	fs.IntVar(&c.ArchiveMaxAgeDays, "archive-max-age-days", c.ArchiveMaxAgeDays, "maximum active age")
@@ -60,6 +65,9 @@ func (c Config) Validate() error {
 	}
 	if c.ArchiveInterval <= 0 {
 		return errors.New("archive interval must be positive")
+	}
+	if c.ArchiveTimeout <= 0 {
+		return errors.New("archive timeout must be positive")
 	}
 	if c.ArchiveThreshold < 1 || c.ArchiveKeepMin < 1 {
 		return errors.New("archive threshold and keep-min must be positive")
