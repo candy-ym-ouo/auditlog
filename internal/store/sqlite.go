@@ -208,17 +208,29 @@ func (s *SQLite) Batches(ctx context.Context, p, size int) (model.BatchPage, err
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM archive_batches`).Scan(&total); err != nil {
 		return model.BatchPage{}, err
 	}
-	if p < 1 {
-		p = 1
+	page, s2 := clampPageArgs(p, size)
+	// offset = (p-1)*size must be a non-negative int representable without
+	// overflow; a wrapped-negative offset here corrupts SQLite (negative
+	// OFFSET is rejected as a constraint error). Compute in int64 and fall back
+	// to an offset past the last row so the query returns an empty page.
+	const maxInt64 = int64(^uint64(0) >> 1)
+	var offset int64
+	page64 := int64(page)
+	size64 := int64(s2)
+	if page64-1 > maxInt64/size64 {
+		offset = total // past the end -> empty result
+	} else {
+		offset = (page64 - 1) * size64
+		if offset < 0 || offset > maxInt64 {
+			offset = total
+		}
 	}
-	if size < 1 {
-		size = 20
+	// A negative or absurd offset would still be rejected by SQLite, so clamp to
+	// a safe upper bound: past-the-last-row yields an empty result set.
+	if offset < 0 {
+		offset = total
 	}
-	if size > 200 {
-		size = 200
-	}
-	offset := (p - 1) * size
-	rows, err := s.db.QueryContext(ctx, `SELECT batch_no,start_seq,end_seq,prev_hash,head_hash,item_count,payload_hash,archived_at FROM archive_batches ORDER BY batch_no DESC LIMIT ? OFFSET ?`, size, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT batch_no,start_seq,end_seq,prev_hash,head_hash,item_count,payload_hash,archived_at FROM archive_batches ORDER BY batch_no DESC LIMIT ? OFFSET ?`, s2, offset)
 	if err != nil {
 		return model.BatchPage{}, err
 	}
@@ -233,7 +245,7 @@ func (s *SQLite) Batches(ctx context.Context, p, size int) (model.BatchPage, err
 		b.ArchivedAt, _ = time.Parse(time.RFC3339Nano, t)
 		out = append(out, b)
 	}
-	return model.BatchPage{Items: out, Page: p, PageSize: size, Total: total}, nil
+	return model.BatchPage{Items: out, Page: page, PageSize: s2, Total: total}, nil
 }
 func (s *SQLite) Batch(ctx context.Context, no int64) (model.ArchiveExport, error) {
 	var b model.ArchiveBatch

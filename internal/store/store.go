@@ -139,27 +139,21 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
-func page(entries []model.Entry, q model.Query) model.Page {
-	if q.Page < 1 {
-		q.Page = 1
-	}
-	if q.PageSize < 1 {
-		q.PageSize = 20
-	}
-	if q.PageSize > 200 {
-		q.PageSize = 200
-	}
-	start := (q.Page - 1) * q.PageSize
-	end := start + q.PageSize
-	if end > len(entries) {
-		end = len(entries)
-	}
-	return model.Page{Items: entries[start:end], Page: q.Page, PageSize: q.PageSize, Total: int64(len(entries))}
-}
 
-func batchPage(batches []model.ArchiveBatch, p, size int) model.BatchPage {
-	if p < 1 {
-		p = 1
+// paginationBounds clamps page/size to sane defaults and returns the slice
+// half-open interval [start, end) for a collection of length n without ever
+// performing an overflowing multiplication. page/size are validated here so
+// both the memory and SQLite stores share identical edge-case semantics.
+//
+// The offset (page-1)*size is computed in int64 to avoid the silent wraparound
+// that happens when page is near MaxInt: (MaxInt-1)*200 underflows to a negative
+// int, which then panics on slice indexing and corrupts SQLite OFFSET. If the
+// offset cannot be safely represented or lands past the end of the data, an empty
+// interval [n, n) is returned so callers yield zero items while still echoing the
+// requested page/size and the true total.
+func paginationBounds(page, size, n int) (int, int) {
+	if page < 1 {
+		page = 1
 	}
 	if size < 1 {
 		size = 20
@@ -167,10 +161,52 @@ func batchPage(batches []model.ArchiveBatch, p, size int) model.BatchPage {
 	if size > 200 {
 		size = 200
 	}
-	start := (p - 1) * size
-	end := start + size
-	if end > len(batches) {
-		end = len(batches)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	page64 := int64(page)
+	size64 := int64(size)
+	// (page-1)*size overflows int64 only when page-1 exceeds maxInt64/size;
+	// guard once before multiplying, then again when narrowing back to int.
+	if page64-1 > maxInt64/size64 {
+		return n, n
 	}
-	return model.BatchPage{Items: append([]model.ArchiveBatch{}, batches[start:end]...), Page: p, PageSize: size, Total: int64(len(batches))}
+	offset := (page64 - 1) * size64
+	if offset < 0 || offset > maxInt64 {
+		return n, n
+	}
+	start := int(offset)
+	if start < 0 || start >= n {
+		return n, n
+	}
+	end := start + size
+	if end < 0 || end > n {
+		end = n
+	}
+	return start, end
+}
+
+func page(entries []model.Entry, q model.Query) model.Page {
+	start, end := paginationBounds(q.Page, q.PageSize, len(entries))
+	page, size := clampPageArgs(q.Page, q.PageSize)
+	return model.Page{Items: entries[start:end], Page: page, PageSize: size, Total: int64(len(entries))}
+}
+
+func batchPage(batches []model.ArchiveBatch, p, size int) model.BatchPage {
+	start, end := paginationBounds(p, size, len(batches))
+	page, s := clampPageArgs(p, size)
+	return model.BatchPage{Items: append([]model.ArchiveBatch{}, batches[start:end]...), Page: page, PageSize: s, Total: int64(len(batches))}
+}
+
+// clampPageArgs mirrors the normalization paginationBounds applies to page/size
+// so the echoed page/page_size fields stay consistent with the interval used.
+func clampPageArgs(page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 200 {
+		size = 200
+	}
+	return page, size
 }
