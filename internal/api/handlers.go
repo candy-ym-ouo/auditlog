@@ -82,9 +82,7 @@ func (x *API) verify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_request", "invalid JSON request body")
 		return
 	}
-	ctx, cancel := context.WithCancel(r.Context())
-	cancel()
-	v, e := x.Verify.Verify(ctx, q)
+	v, e := x.Verify.Verify(r.Context(), q)
 	if e != nil {
 		writeError(w, 400, "invalid_request", e.Error())
 		return

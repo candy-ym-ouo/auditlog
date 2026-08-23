@@ -1,17 +1,24 @@
 package chain
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"auditlog/internal/model"
 )
 
-func Verify(entries []model.Entry, head model.Head, request model.VerifyRequest) model.VerifyReport {
+func Verify(ctx context.Context, entries []model.Entry, head model.Head, request model.VerifyRequest) model.VerifyReport {
 	started := time.Now()
 	report := model.VerifyReport{Mode: request.Mode, Status: model.VerifyOK, HeadHash: head.Hash, VerifiedAt: started.UTC(), Archives: []model.ArchiveVerification{}}
 	if report.Mode == "" {
 		report.Mode = "full"
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			report.DurationMS = time.Since(started).Milliseconds()
+			return report
+		}
 	}
 	selected := selectEntries(entries, request)
 	if len(selected) == 0 {
@@ -20,6 +27,11 @@ func Verify(entries []model.Entry, head model.Head, request model.VerifyRequest)
 	}
 	report.StartSeq, report.EndSeq = selected[0].Seq, selected[len(selected)-1].Seq
 	for i, entry := range selected {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				break
+			}
+		}
 		report.CheckedEntries++
 		expectedPrev := entry.PrevHash
 		if entry.Seq == 1 {
