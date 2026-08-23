@@ -13,13 +13,16 @@ type TraceContext struct {
 	LinkOK        bool           `json:"link_ok"`
 	ChainPosition map[string]any `json:"chain_position"`
 }
+// TraceService holds only stateless dependencies. Per-request data (such as
+// ChainPosition) is built fresh on each call so that concurrent requests never
+// share a mutable map — the returned TraceContext owns its own map, and callers
+// may mutate it without leaking into other responses.
 type TraceService struct {
-	Store    store.Store
-	position map[string]any
+	Store store.Store
 }
 
 func NewTrace(s store.Store) *TraceService {
-	return &TraceService{Store: s, position: map[string]any{}}
+	return &TraceService{Store: s}
 }
 func (t *TraceService) Context(c context.Context, id int64, r int) (TraceContext, error) {
 	if r < 0 || r > 100 {
@@ -51,10 +54,15 @@ func (t *TraceService) Context(c context.Context, id int64, r int) (TraceContext
 		b = len(all)
 	}
 	ok := idx == 0 || center.PrevHash == all[idx-1].Hash
-	t.position["seq"] = center.Seq
-	t.position["prev_hash_ok"] = ok
-	t.position["hash_ok"] = true
-	return TraceContext{Center: center, Before: all[a:idx], After: all[idx+1 : b], LinkOK: ok, ChainPosition: t.position}, nil
+	// Build a per-call map owned by this TraceContext. Returning a shared map
+	// would let concurrent requests overwrite each other's fields and race on
+	// the same map under the race detector.
+	position := map[string]any{
+		"seq":          center.Seq,
+		"prev_hash_ok": ok,
+		"hash_ok":      true,
+	}
+	return TraceContext{Center: center, Before: all[a:idx], After: all[idx+1 : b], LinkOK: ok, ChainPosition: position}, nil
 }
 func (t *TraceService) Report(c context.Context, q model.Query) (map[string]any, error) {
 	p, e := t.Store.Entries(c, q)
