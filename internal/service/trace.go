@@ -23,7 +23,7 @@ func (t *TraceService) Context(c context.Context, id int64, r int) (TraceContext
 	}
 	center, e := t.Store.EntryByID(c, id)
 	if e != nil {
-		return TraceContext{}, fmt.Errorf("load trace center: %v", e)
+		return TraceContext{}, fmt.Errorf("load trace center: %w", e)
 	}
 	all, e := t.Store.AllEntries(c)
 	if e != nil {
