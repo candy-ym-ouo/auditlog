@@ -1,0 +1,13 @@
+# Local build outputs
+/auditlog-server
+/bin/
+
+# SQLite runtime data
+/*.db
+/*.db-shm
+/*.db-wal
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
