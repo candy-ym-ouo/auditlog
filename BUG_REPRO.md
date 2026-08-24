@@ -2,8 +2,8 @@
 
 基线分支：`green_base_bug_008`
 
-归档服务使用固定短超时，且数据库 rows 与事务释放范围不合理，慢归档会被错误中止并留下异常状态。
+归档服务把每次归档的内部 deadline 固定为两秒，无法支持耗时超过该预算的正常归档操作。
 
-复现：使用较大的活动记录集触发归档，观察约两秒后是否出现 deadline exceeded 或资源未及时释放。
+复现：让 Store 检查 ArchiveService 传入 context 的剩余 deadline；修复前剩余时间约为两秒，不足以完成较大的归档任务。
 
-验证：`go test ./internal/service -run '^TestBug008ArchiveHonorsCallerCancellation$' -count=20`
+验证：`go test ./internal/service -count=20 -run '^TestBug008ArchiveAllowsLongRunningStoreOperation$'`
